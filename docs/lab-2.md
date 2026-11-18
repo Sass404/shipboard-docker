@@ -1,6 +1,6 @@
 # Lab 2: dalla pipeline al cloud, e poi dentro l'app
 
-Oggi ShipBoard fa il viaggio completo: Dockerfile, immagine costruita da GitHub Actions, pubblicata su GitHub Container Registry, in produzione su un App Service gratuito. Poi guardiamo dentro l'app che gira, con OpenTelemetry e .NET Aspire.
+Oggi ShipBoard fa il viaggio completo: Dockerfile, immagine costruita da GitHub Actions, pubblicata su GitHub Container Registry, in produzione su un hosting gratuito (Render per tutti, Azure App Service per chi ha la subscription). Poi guardiamo dentro l'app che gira, con OpenTelemetry e .NET Aspire.
 
 **Regole**
 - A coppie, una issue e una PR per esercizio. La CI deve restare verde.
@@ -90,34 +90,65 @@ Obiettivo: a ogni push su `main`, la CI costruisce le immagini di API e frontend
 
 Domande: perche' due tag (SHA e `latest`)? Quale usereste per un rollback? Perche' `packages: write` sta sul job e non in cima al file? La seconda run e' piu' veloce della prima: chi ha la cache?
 
-## 7. Deploy su App Service gratuito (step-07)
+## 7. Deploy gratuito (step-07)
 
-Obiettivo: l'API gira su `https://shipboard-<utente>.azurewebsites.net` e ogni merge su `main` la aggiorna, senza password salvate da nessuna parte.
+Obiettivo: l'API gira su internet e ogni merge su `main` la aggiorna con l'immagine appena pubblicata. Tutti fanno **7a** (Render, gratis, senza carta di credito). Chi ha Azure for Students fa anche **7b**: in coppia basta che uno dei due ce l'abbia.
 
-### 7a. A mano, con la az CLI
+### 7a. Render, per tutti
+
+1. Entrate su [render.com](https://render.com) con l'account GitHub.
+2. **New, Web Service, Existing Image**: `ghcr.io/<utente>/shipboard-api:latest` (il pacchetto deve essere pubblico, esercizio 6).
+3. Nome `shipboard-<utente>`, piano **Free**. In **Environment** aggiungete `PORT=8080`: Render inoltra il traffico su quella porta. In **Advanced**, health check path `/health`.
+4. Create e aprite `https://shipboard-<utente>.onrender.com/info`. Il piano free si addormenta dopo 15 minuti senza richieste: la prima risposta puo' metterci un minuto.
+5. Pipeline. Su Render, **Settings, Deploy Hook**: copiate l'URL. In GitHub, **Settings, Secrets and variables, Actions**:
+   - secret di repository `RENDER_DEPLOY_HOOK_URL` con l'URL del deploy hook
+   - variabile di repository `RENDER_URL`, es. `https://shipboard-mario.onrender.com`
+6. Aggiungete il job dopo `image`. Completate i `___`:
+   ```yaml
+     deploy-render:
+       if: vars.RENDER_URL != ''          # chi non ha configurato Render non fa fallire la CI
+       needs: ___
+       runs-on: ubuntu-latest
+       environment:
+         name: render
+         url: ${{ vars.RENDER_URL }}/info
+       steps:
+         - name: Deploy
+           env:
+             HOOK: ${{ ___.RENDER_DEPLOY_HOOK_URL }}
+           run: |
+             IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/shipboard-api:$GITHUB_SHA"
+             curl -fsS -X POST "$HOOK&imgURL=$(jq -rn --arg v "$IMAGE" '$v|@uri')"
+   ```
+   Il parametro `imgURL` dice a Render quale tag usare: quello con lo SHA, non `latest`.
+7. Verifica: cambiate qualcosa di visibile, PR, merge. Dopo qualche minuto `/info` ha lo SHA del commit nuovo. Bonus: aggiungete uno step di smoke test che aspetta lo SHA su `/info` e fallisce dopo 6 minuti.
+
+**Rompetelo apposta** (una cosa alla volta, poi rimettete a posto):
+- Nel `curl`, cambiate `shipboard-api` in `shipboard-web`. Cosa risponde Render? Perche' e' una buona cosa?
+- Su Render rigenerate il deploy hook e rilanciate la pipeline senza aggiornare il secret. Cosa succede? Quando lo fareste davvero?
+
+Domande: l'URL del deploy hook e' una password? Chi lo ha cosa puo' fare? Perche' e' un secret e `RENDER_URL` una variabile?
+
+### 7b. Azure App Service con OIDC (con la subscription)
+
+Stessa cosa, ma senza nessuna password: GitHub dimostra ad Azure chi e' con un token OIDC firmato, Azure decide cosa puo' fare con RBAC.
 
 ```bash
 az login
 az account show                            # la subscription giusta?
 IMAGE=ghcr.io/<utente>/shipboard-api:latest ./infra/app-service.sh
-```
-
-Mentre gira, leggete lo script: resource group, piano **F1** (gratis), web app che esegue un container, `WEBSITES_PORT=8080`. Aprite l'URL stampato alla fine (il primo avvio puo' richiedere un minuto) e guardate i log con `az webapp log tail`.
-
-Se il piano F1 da' errore: la vostra subscription ne ha gia' uno in quella regione, oppure la regione non e' permessa. Riprovate con `LOCATION=italynorth` (o `swedencentral`).
-
-### 7b. Dalla pipeline, con OIDC
-
-```bash
 REPO=<utente>/shipboard-docker NAME=shipboard-<utente> ./infra/github-oidc.sh
 ```
 
-Lo script crea una **Managed Identity** che si fida solo dei job del vostro repo nell'environment `production`, le da' il ruolo `Website Contributor` **solo** sulla vostra web app e salva quattro variabili nell'environment GitHub (se avete la `gh` CLI, altrimenti ve le stampa e le copiate a mano in **Settings, Environments, production**).
+Leggete gli script mentre girano. `app-service.sh` crea resource group, piano **F1** (gratis) e web app con `WEBSITES_PORT=8080`. `github-oidc.sh` crea una **Managed Identity** che si fida solo dei job del vostro repo nell'environment `production`, le da' il ruolo `Website Contributor` **solo** sulla vostra web app e salva le variabili su GitHub (con la `gh` CLI, altrimenti ve le stampa: `AZURE_WEBAPP_NAME` va tra le variabili di repository, le altre nell'environment `production`).
 
-Aggiungete il job `deploy` dopo `image`. Completate i `___`:
+Se il piano F1 da' errore: la subscription ne ha gia' uno in quella regione, oppure la regione non e' permessa. Riprovate con `LOCATION=italynorth` (o `swedencentral`).
+
+Aggiungete il job `deploy-azure` dopo `image`. Completate i `___`:
 
 ```yaml
-  deploy:
+  deploy-azure:
+    if: vars.AZURE_WEBAPP_NAME != ''
     needs: image
     runs-on: ubuntu-latest
     environment:
@@ -139,14 +170,11 @@ Aggiungete il job `deploy` dopo `image`. Completate i `___`:
           images: ${{ env.___ }}
 ```
 
-Verifica: cambiate qualcosa di visibile, PR, merge. Nella run, il job `deploy` mostra il link all'app. `/info` deve avere lo SHA del commit nuovo.
-
-**Rompetelo apposta** (una cosa alla volta, poi rimettete a posto):
+**Rompetelo apposta**:
 - Rinominate l'environment nel job in `prod`. Che errore da' `azure/login`? Perche'?
 - Togliete `id-token: write`. Che errore da'?
-- Puntate l'app a un'immagine che non esiste: `az webapp config container set -n <app> -g rg-shipboard --container-image-name ghcr.io/<utente>/shipboard-api:non-esiste`. Cosa dicono `/info` e `az webapp log tail`? Come tornate indietro senza toccare il codice?
 
-Domande: dove sono le password in tutto questo? Cosa puo' fare un attaccante che ruba `AZURE_CLIENT_ID`? Cosa potrebbe fare la Managed Identity se le aveste dato `Contributor` sulla subscription?
+Domande: confrontate con Render. Dove sono le password? Cosa puo' fare un attaccante che ruba `AZURE_CLIENT_ID`? E uno che ruba il deploy hook di Render? Cosa potrebbe fare la Managed Identity se le aveste dato `Contributor` sulla subscription?
 
 ## 8. OpenTelemetry (step-08)
 
@@ -227,9 +255,9 @@ Obiettivo: un solo `dotnet run` che avvia PostgreSQL, API e frontend, con la ste
 
 Domande: cosa fa Aspire che compose non fa, e viceversa? Quale dei due usereste in produzione? In un'azienda con 10 servizi, dove mettereste la configurazione di OpenTelemetry per non ripeterla 10 volte? (cercate "Aspire ServiceDefaults")
 
-## 10. Bonus: Application Insights (step-10)
+## 10. Application Insights (step-10, con Azure)
 
-La stessa telemetria, ma dall'app su Azure.
+La stessa telemetria, ma dall'app su Azure. Serve l'App Service dell'esercizio 7b: chi non ha Azure lo fa in coppia con chi ce l'ha, o lo segue alla demo del docente.
 
 1. `dotnet add src/ShipBoard.Api package Azure.Monitor.OpenTelemetry.AspNetCore --version 1.6.0`
 2. In `Program.cs`, se c'e' `APPLICATIONINSIGHTS_CONNECTION_STRING` usate `UseAzureMonitor()` al posto di `UseOtlpExporter()`.
@@ -247,4 +275,4 @@ La stessa telemetria, ma dall'app su Azure.
 az group delete -n rg-shipboard --yes --no-wait
 ```
 
-Oppure tenetelo: il piano F1 e' gratis. Application Insights costa solo oltre la quota gratuita, ma cancellatelo se non lo usate.
+Oppure tenetelo: il piano F1 e' gratis, come il servizio free su Render. Application Insights costa solo oltre la quota gratuita, ma cancellatelo se non lo usate.

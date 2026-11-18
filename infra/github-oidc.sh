@@ -44,12 +44,18 @@ declare -A VARS=(
 if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
   echo "==> Environment $ENVIRONMENT e variabili su GitHub (con la gh CLI)"
   gh api -X PUT "repos/$REPO/environments/$ENVIRONMENT" >/dev/null
-  for k in "${!VARS[@]}"; do gh variable set "$k" --env "$ENVIRONMENT" --repo "$REPO" --body "${VARS[$k]}"; done
+  for k in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do
+    gh variable set "$k" --env "$ENVIRONMENT" --repo "$REPO" --body "${VARS[$k]}"
+  done
+  # A livello di repository: il job deploy-azure la legge nel suo "if", prima di entrare nell'environment.
+  gh variable set AZURE_WEBAPP_NAME --repo "$REPO" --body "$NAME"
   echo "Fatto. Controllate in Settings > Environments > $ENVIRONMENT."
 else
   echo
   echo "Ora su GitHub: Settings > Environments > New environment '$ENVIRONMENT', poi aggiungete queste VARIABLES (non secrets):"
-  for k in "${!VARS[@]}"; do echo "  $k = ${VARS[$k]}"; done
+  for k in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID; do echo "  $k = ${VARS[$k]}"; done
+  echo "E questa come variabile di REPOSITORY (Settings > Secrets and variables > Actions > Variables):"
+  echo "  AZURE_WEBAPP_NAME = $NAME"
 fi
 echo
 echo "Il ruolo puo' impiegare un paio di minuti a propagarsi: se il primo deploy da' 403, rilanciatelo."
